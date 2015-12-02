@@ -18,5 +18,7 @@
    #:hypotrochoid-y
    #:draw-spirograph
    #:animate-spirograph
+
+   #:from-mp3
 ))
 

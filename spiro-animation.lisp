@@ -16,7 +16,7 @@
             (+ a (* da cur-step)))
           (let ((da (/ (- a b) (/ steps 2))))
             (+ b (* da (- cur-step (/ steps 2)) ))))))
-      
+
 
 ;; map-val is used to map logical coordinates to screen coordinates.
 (defun map-val (x xmin xmax new-xmin new-xmax)
@@ -86,6 +86,7 @@
                  (spirograph-b spiro)))))))
 
 (defun inner-draw-spirograph (sp width height line-function
+                              color-function
                               x-function y-function)
   "Draw the spirograph sp using the given functions.  line-function should 
    be a function taking four parameters (x1, y1, x2, y2)."
@@ -98,8 +99,8 @@
 
         ;; real-dt is the actual increase in tv each iteration
         (real-dt (if (eql (spirograph-dt-type sp) :normal)
-                 (spirograph-dt sp)
-                 (/ pi (spirograph-dt sp)))))
+                     (spirograph-dt sp)
+                     (/ pi (spirograph-dt sp)))))
     
     ;; Define some local functions for convenience
     (flet (
@@ -115,19 +116,25 @@
            (spirograph-x (tv) (funcall x-function sp tv))
            (spirograph-y (tv) (funcall y-function sp tv)))
       
-        ;; Draw the curve
-        (loop
-           for i below (spirograph-steps sp)
-           for cur-t = 0.0 then (* i real-dt)
-           do
-             (funcall
-              line-function
-              (truncate (xmapper (spirograph-x cur-t)))
-              (truncate (ymapper (spirograph-y cur-t)))
-              (truncate (xmapper (spirograph-x
-                                  (+ (spirograph-dt sp) cur-t))))
-              (truncate (ymapper (spirograph-y
-                                  (+ (spirograph-dt sp) cur-t)))))))))
+      ;; Draw the curve
+      (loop
+         for i below (spirograph-steps sp)
+         for cur-t = 0.0 then (* i real-dt)
+         do
+           (funcall
+            color-function
+            0.0
+            (+ 0.2 (/ (* i 0.6) (spirograph-steps sp)))
+            0.0
+            0.95)
+           (funcall
+            line-function
+            (truncate (xmapper (spirograph-x cur-t)))
+            (truncate (ymapper (spirograph-y cur-t)))
+            (truncate (xmapper (spirograph-x
+                                (+ (spirograph-dt sp) cur-t))))
+            (truncate (ymapper (spirograph-y
+                                (+ (spirograph-dt sp) cur-t)))))))))
 
 
 (defun cairo-draw-spirograph (file-name spiro width height
@@ -143,10 +150,13 @@
     (cl-cairo2:set-source-rgba 0.0 0.8 0.0 0.95)
     (flet ((cairo-line (x1 y1 x2 y2)
              (cl-cairo2:move-to x1 y1)
-             (cl-cairo2:line-to x2 y2)))
-      (inner-draw-spirograph spiro width height #'cairo-line
-                             x-function y-function))
-    (cl-cairo2:stroke)))
+             (cl-cairo2:line-to x2 y2)
+             (cl-cairo2:stroke)))
+
+
+      (inner-draw-spirograph spiro width height
+                             #'cairo-line #'cl-cairo2:set-source-rgba
+                             x-function y-function))))
 
 (defun animate-spirograph (&key
                              begin end
@@ -173,12 +183,17 @@
     (setf lparallel:*kernel* kernel)
     (unwind-protect
          (dotimes (cur-frame total-frames)
-           (let ((file-name (format nil "~aframe~5,'0d.png" real-dir-name cur-frame))
-                 (spiro (interpolate-spirograph begin end cur-frame total-frames looping)))
+           (let ((file-name (format nil
+                                    "~aframe~5,'0d.png" real-dir-name cur-frame))
+                 (spiro (interpolate-spirograph begin end
+                                                cur-frame total-frames
+                                                looping)))
              (setf futures
                    (cons
-                    (lparallel:future
-                      (cairo-draw-spirograph file-name spiro width height x-function y-function))
+                    (lparallel:future (cairo-draw-spirograph file-name spiro
+                                                             width height
+                                                             x-function
+                                                             y-function))
                     futures))))
       (when futures (dolist (fut futures) (lparallel:force fut)))
       (when kernel (lparallel:end-kernel :wait t)))))
@@ -191,4 +206,215 @@
                           (x-function #'epitrochoid-x)
                           (y-function #'epitrochoid-y))
   "Draw a spirograph to an image file."
-  (cairo-draw-spirograph file-name spiro width height :x-function x-function :y-function y-function))
+  (cairo-draw-spirograph file-name spiro
+                         width height :x-function x-function :y-function y-function))
+
+
+(defstruct mp3-file
+  (samples)
+  (sample-rate 44100 :type (unsigned-byte 32))
+  (channels 2 :type (unsigned-byte 32))
+  (mpg123-type 208 :type (unsigned-byte 32)))
+
+(defun read-mp3-file (fname)
+  "Read the specified mp3 file into an mp3-file structure."
+  (multiple-value-bind
+        (samples sample-rate channels mt)
+      (mpg123:decode-mp3-file fname :character-encoding :utf-8)
+    (make-mp3-file
+     :samples samples
+     :sample-rate sample-rate
+     :channels channels
+     :mpg123-type mt)))
+
+(defun duration-in-seconds (mp3)
+  "Compute the duration of an mp3-file in seconds."
+  (/ (length (mp3-file-samples mp3)) 
+     (* (mp3-file-channels mp3) (mp3-file-sample-rate mp3))))
+
+
+(defun get-channels-for-fft (mp3-file time-offset left-buffer right-buffer)
+  "Populate left-buffer and right-buffer with data from the left and right 
+   channels of mp3-file starting at time-offset (measured in seconds)."
+  (let ((offset (* (floor (* time-offset (mp3-file-sample-rate mp3-file)))
+                   (mp3-file-channels mp3-file)))
+        (max-len (length (mp3-file-samples mp3-file)))
+        (size (min (array-dimension left-buffer 0) 
+                   (array-dimension right-buffer 0))))
+
+    (dotimes (i size)
+      (let ((next-idx (+ offset (* (mp3-file-channels mp3-file) i))))
+        (if (<  (+ 1 next-idx) max-len)
+            (let* ((idx (+ offset (* (mp3-file-channels mp3-file) i)))
+                   (left-raw (aref (mp3-file-samples mp3-file) idx))
+                   (right-raw (aref (mp3-file-samples mp3-file) (1+ idx))))
+              (setf (aref left-buffer i)
+                    (coerce (/ left-raw 32768.0) '(complex double-float)))
+              (setf (aref right-buffer i)
+                    (coerce (/ right-raw 32768.0) '(complex double-float))))
+            (progn 
+              (setf (aref left-buffer i) (coerce 0.0 '(complex double-float)))
+              (setf (aref right-buffer i) (coerce 0.0 '(complex double-float)))))))))
+
+(defun make-movie (directory mp3-name final-name tmp-name &optional (remove-tmp t))
+  "Run ffmpeg to create a movie with audio."
+  (if (probe-file tmp-name)
+      (delete-file tmp-name))
+
+  (let ((movie-command
+         (format nil 
+                 "ffmpeg -r 30 -i \"~aframe%05d.png\" -b 2400 -q 4 \"~a\""
+                 directory tmp-name))
+        (audio-command
+         (format nil
+                 "ffmpeg -i \"~a\" -i \"~a\" -codec copy -shortest \"~a\""
+                 tmp-name mp3-name final-name)))
+    
+    (format t "~a~%" movie-command)
+    (uiop:run-program movie-command)
+    (if (probe-file final-name)
+        (delete-file final-name))
+
+    (format t "~a~%" audio-command)
+    (uiop:run-program audio-command)
+    (if remove-tmp
+        (delete-file tmp-name))))
+
+(defun fix-directory (directory-name)
+  "Make sure directory exists and has a / at the end."
+  (ensure-directories-exist
+   (if (char=  #\/ (aref directory-name (- (length directory-name) 1)))
+       directory-name
+       (concatenate 'string directory-name "/"))))
+
+(defun from-mp3 (&key
+                   mp3-file-name output-directory
+                   (movie-file-name "spirograph_with_sound.mpg")
+                   (keep-pngs nil)
+                   (keep-soundless nil)
+
+                   (width 800) (height 800)
+                   (num-steps 240) (a-base 51.0) (b-base 7.0) (h-base 29.0)
+                   (dt-base 70.0)
+                   (fps 30)
+                   (verbose t)
+                   (threads 4)
+                   (num-samples 32)
+                   (a-sample 3)
+                   (b-sample 5)
+                   (h-sample 7)
+                   (dt-sample 30)
+                   (movie-duration nil)
+                   (tmp-movie-name "spirograph.mpg")
+                   (transition-type :type2)
+                   (x-function #'epitrochoid-x) (y-function #'epitrochoid-y))
+  "Generate an animation from an MP3 file."
+  
+  (let* ((real-dir-name (fix-directory output-directory))
+
+         (mp3-file (read-mp3-file mp3-file-name))
+
+         (song-duration (duration-in-seconds mp3-file))
+         (real-movie-duration (if movie-duration
+                                  (min song-duration movie-duration)
+                                  song-duration))
+         
+         (total-frames (ceiling (* real-movie-duration fps)))
+
+         (files-created nil)
+         (spiros nil)
+
+         (full-movie-name (format nil "~a~a" real-dir-name movie-file-name))
+         (full-tmp-movie-name (format nil "~a~a" real-dir-name tmp-movie-name))
+
+         (left-channel (make-array num-samples
+                                   :element-type '(complex double-float)))
+
+         (right-channel (make-array num-samples
+                                    :element-type '(complex double-float)))
+
+         (spiro (make-spirograph :steps num-steps
+                                 :a a-base
+                                 :b b-base
+                                 :h h-base
+                                 :dt dt-base :dt-type :over-pi))
+         (kernel (lparallel:make-kernel threads))
+         (futures nil))
+    
+    (when verbose (format t "Creating animation with ~a frames." total-frames))
+
+    (dotimes (cur-frame total-frames)
+      (let* ((file-name (format nil
+                                "~aframe~5,'0d.png" real-dir-name cur-frame)))
+        
+        (get-channels-for-fft mp3-file
+                              (interpolate 0.0 song-duration
+                                           cur-frame total-frames)
+                              left-channel right-channel)
+
+        (bordeaux-fft:fft left-channel)
+
+        (let* ((reduction-factor 100.0)
+               (a-factor (/ (abs (aref left-channel a-sample))
+                            reduction-factor))
+               
+               (b-factor (/ (abs (aref left-channel b-sample))
+                            reduction-factor))
+
+               (h-factor (/ (abs (aref left-channel h-sample))
+                            reduction-factor))
+
+               (dt-factor (/ (abs (aref left-channel dt-sample))
+                             reduction-factor)))
+
+          (if (eq transition-type :type2)
+              (progn
+                (incf (spirograph-a spiro)
+                      (coerce a-factor 'single-float))
+
+                (incf (spirograph-b spiro)
+                      (coerce b-factor 'single-float))
+
+                (incf (spirograph-h spiro)
+                      (coerce h-factor 'single-float))
+
+                (incf (spirograph-dt spiro)
+                      (coerce dt-factor 'single-float))
+
+                (push (cons (copy-structure spiro) file-name)
+                      spiros))
+
+              (progn
+                (setf (spirograph-a spiro)
+                      (coerce (+ a-base a-factor) 'single-float))
+
+                (setf (spirograph-b spiro)
+                      (coerce (+ b-base b-factor) 'single-float))
+
+                (setf (spirograph-h spiro)
+                      (coerce (+ h-base h-factor) 'single-float))
+
+                (incf (spirograph-dt spiro)
+                      (coerce dt-factor 'single-float))
+
+                (push (cons (copy-structure spiro) file-name) spiros))))))
+
+    (setf lparallel:*kernel* kernel)
+    (unwind-protect
+
+         (dolist (nspiro spiros)
+           (push (lparallel:future
+                   (cairo-draw-spirograph (cdr nspiro)
+                                          (car nspiro)
+                                          width height
+                                          x-function y-function)
+                   (push (cdr nspiro) files-created))
+                 futures))
+      (when futures (dolist (fut futures) (lparallel:force fut)))
+      (when kernel (lparallel:end-kernel :wait t)))
+
+    (make-movie real-dir-name mp3-file-name full-movie-name
+                full-tmp-movie-name (not keep-soundless))
+    (if (not keep-pngs)
+        (dolist (fname files-created)
+          (delete-file fname)))))
