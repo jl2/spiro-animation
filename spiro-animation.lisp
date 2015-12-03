@@ -100,22 +100,28 @@
         ;; real-dt is the actual increase in tv each iteration
         (real-dt (if (eql (spirograph-dt-type sp) :normal)
                      (spirograph-dt sp)
-                     (/ pi (spirograph-dt sp)))))
+                     (/ pi (spirograph-dt sp))))
+        
+        (x-aspect-ratio (if (< height width)
+                            (/ height width 1.0)
+                            1.0))
+        (y-aspect-ratio (if (< height width)
+                            1.0
+                            (/ width height 1.0))))
     
     ;; Define some local functions for convenience
     (flet (
            ;; xmapper maps logical x coordinates in the range x-min to x-max to
            ;; screen coordinates in the range 0 to width
-           (xmapper (x) (map-val x (- max-radius) max-radius 0 width))
+           (xmapper (x) (map-val (* x-aspect-ratio x) (- max-radius) max-radius 0 width))
 
            ;; ymapper does the same thing, but for y coordinates
-           (ymapper (y) (map-val y (- max-radius) max-radius 0 height))
+           (ymapper (y) (map-val (* y-aspect-ratio y) (- max-radius) max-radius 0 height))
            
            ;; spirograph-x and spirograph-y hide funcall and make the code
            ;; easier to read below
            (spirograph-x (tv) (funcall x-function sp tv))
            (spirograph-y (tv) (funcall y-function sp tv)))
-      
       ;; Draw the curve
       (loop
          for i below (spirograph-steps sp)
@@ -124,7 +130,7 @@
            (funcall
             color-function
             0.0
-            (+ 0.2 (/ (* i 0.6) (spirograph-steps sp)))
+            (+ 0.3 (/ (* i 0.6) (spirograph-steps sp)))
             0.0
             0.95)
            (funcall
@@ -147,7 +153,7 @@
     
     (cl-cairo2:scale 1 1)
     (cl-cairo2:set-line-width 0.5)
-    (cl-cairo2:set-source-rgba 0.0 0.8 0.0 0.95)
+    (cl-cairo2:set-source-rgba 0.0 0.0 0.8 0.95)
     (flet ((cairo-line (x1 y1 x2 y2)
              (cl-cairo2:move-to x1 y1)
              (cl-cairo2:line-to x2 y2)
@@ -261,15 +267,15 @@
   (/ (length (mp3-file-samples mp3)) 
      (* (mp3-file-channels mp3) (mp3-file-sample-rate mp3))))
 
-(defun make-movie (directory mp3-name final-name tmp-name &optional (remove-tmp t))
+(defun make-movie (directory mp3-name final-name tmp-name &optional (remove-tmp t) (bit-rate (* 4 2014)))
   "Run ffmpeg to create a movie with audio."
   (if (probe-file tmp-name)
       (delete-file tmp-name))
 
   (let ((movie-command
          (format nil 
-                 "ffmpeg -r 30 -i \"~aframe%05d.png\" -b 2400 -q 4 \"~a\""
-                 directory tmp-name))
+                 "ffmpeg -r 30 -i \"~aframe%05d.png\" -b ~a -q 4 \"~a\""
+                 directory bit-rate tmp-name))
         (audio-command
          (format nil
                  "ffmpeg -i \"~a\" -i \"~a\" -codec copy -shortest \"~a\""
@@ -328,7 +334,7 @@
 ;;                                    :a-transform (spiro-animation:make-fixed-type2 '(1 10) 0.001)
 ;;                                    :b-transform (spiro-animation:make-fixed-type2 '(11 20) 0.001)
 ;;                                    :h-transform (spiro-animation:make-fixed-type2 '(21 30) 0.001)
-                                   :dt-transform (spiro-animation:make-fixed-type2 '(22 23) 0.001)))
+;;                                    :dt-transform (spiro-animation:make-fixed-type2 '(22 23) 0.001)))
 (defun from-mp3 (&key
                    mp3-file-name output-directory
                    (movie-file-name "spirograph_with_sound.mpg")
@@ -336,6 +342,7 @@
                    (keep-soundless nil)
 
                    (width 800) (height 800)
+                   (bit-rate (* 4 1024))
                    (num-steps 240) (a-base 51.0) (b-base 7.0) (h-base 29.0)
                    (dt-base 70.0)
                    (fps 30)
@@ -417,7 +424,7 @@
       (when kernel (lparallel:end-kernel :wait t)))
 
     (make-movie real-dir-name mp3-file-name full-movie-name
-                full-tmp-movie-name (not keep-soundless))
+                full-tmp-movie-name (not keep-soundless) bit-rate)
     (if (not keep-pngs)
         (dolist (fname files-created)
           (delete-file fname)))))
