@@ -211,50 +211,55 @@
 
 
 (defstruct mp3-file
+  (left-channel)
+  (right-channel)
   (samples)
   (sample-rate 44100 :type (unsigned-byte 32))
   (channels 2 :type (unsigned-byte 32))
   (mpg123-type 208 :type (unsigned-byte 32)))
+
+(defun next-power-of-2 (num)
+  (loop
+     for power from 0
+     for cn = num then (floor (/ cn 2))
+     until (< cn 2)
+     finally (return (ash 1 (+ 1 power)))))
+
 
 (defun read-mp3-file (fname)
   "Read the specified mp3 file into an mp3-file structure."
   (multiple-value-bind
         (samples sample-rate channels mt)
       (mpg123:decode-mp3-file fname :character-encoding :utf-8)
-    (make-mp3-file
-     :samples samples
-     :sample-rate sample-rate
-     :channels channels
-     :mpg123-type mt)))
+    
+    (let* ((samples-per-channel (/ (length samples) channels))
+           (left-channel (make-array samples-per-channel
+                                     :element-type '(complex double-float)
+                                     :initial-element (coerce 0.0 '(complex double-float))))
+           (right-channel (make-array samples-per-channel
+                                     :element-type '(complex double-float)
+                                     :initial-element (coerce 0.0 '(complex double-float)))))
+      (loop for i below samples-per-channel
+         do
+           (let ((left-raw (/ (aref samples (* 2 i)) 32768.0))
+                 (right-raw (/ (aref samples (+ 1 (* 2 i))) 32768.0)))
+             
+             (setf (aref left-channel i)
+                   (coerce left-raw '(complex double-float)))
+             (setf (aref right-channel i)
+                   (coerce right-raw '(complex double-float)))))
+      (make-mp3-file
+       :samples samples
+       :left-channel left-channel
+       :right-channel right-channel
+       :sample-rate sample-rate
+       :channels channels
+       :mpg123-type mt))))
 
 (defun duration-in-seconds (mp3)
   "Compute the duration of an mp3-file in seconds."
   (/ (length (mp3-file-samples mp3)) 
      (* (mp3-file-channels mp3) (mp3-file-sample-rate mp3))))
-
-
-(defun get-channels-for-fft (mp3-file time-offset left-buffer right-buffer)
-  "Populate left-buffer and right-buffer with data from the left and right 
-   channels of mp3-file starting at time-offset (measured in seconds)."
-  (let ((offset (* (floor (* time-offset (mp3-file-sample-rate mp3-file)))
-                   (mp3-file-channels mp3-file)))
-        (max-len (length (mp3-file-samples mp3-file)))
-        (size (min (array-dimension left-buffer 0) 
-                   (array-dimension right-buffer 0))))
-
-    (dotimes (i size)
-      (let ((next-idx (+ offset (* (mp3-file-channels mp3-file) i))))
-        (if (<  (+ 1 next-idx) max-len)
-            (let* ((idx (+ offset (* (mp3-file-channels mp3-file) i)))
-                   (left-raw (aref (mp3-file-samples mp3-file) idx))
-                   (right-raw (aref (mp3-file-samples mp3-file) (1+ idx))))
-              (setf (aref left-buffer i)
-                    (coerce (/ left-raw 32768.0) '(complex double-float)))
-              (setf (aref right-buffer i)
-                    (coerce (/ right-raw 32768.0) '(complex double-float))))
-            (progn 
-              (setf (aref left-buffer i) (coerce 0.0 '(complex double-float)))
-              (setf (aref right-buffer i) (coerce 0.0 '(complex double-float)))))))))
 
 (defun make-movie (directory mp3-name final-name tmp-name &optional (remove-tmp t))
   "Run ffmpeg to create a movie with audio."
@@ -287,6 +292,43 @@
        directory-name
        (concatenate 'string directory-name "/"))))
 
+
+(defun average-between (fft-data start end)
+  (loop for idx from start below end
+     summing (aref fft-data idx) into total
+     finally (return (coerce (/ (abs total) (- end start)) 'single-float))))
+
+(defun calculate-next-type2 (previous fft-data samples scale-factor)
+  (coerce (+ previous (* scale-factor (abs (average-between fft-data (car samples) (cadr samples))))) 'single-float))
+
+(defun make-fixed-type2 (samples scale-factor)
+  (lambda (previous fft-data)
+    (calculate-next-type2 previous fft-data samples scale-factor)))
+
+(defun calculate-next-type1 (previous fft-data o-value samples scale-factor)
+  (declare (ignore previous))
+  (coerce (+ o-value (* scale-factor (abs (average-between fft-data (car samples) (cadr samples))))) 'single-float))
+
+(defun make-fixed-type1 (o-value samples scale-factor)
+  (lambda (previous fft-data)
+    (calculate-next-type1 previous fft-data o-value samples scale-factor)))
+
+
+;; Sampled call:
+;; (time (spiro-animation:from-mp3 :mp3-file-name "/mnt/externalhd/PhotoBackup_backup/my_music/silence/encre/01 - Flocon.mp3"
+;;                                    :output-directory "/home/jeremiah/spirographs/attempt36/"
+;;                                    :width 800 :height 800
+;;                                    :num-steps 420
+;;                                    :a-base 39.0
+;;                                    :b-base 7.0
+;;                                    :h-base 32.0
+;;                                    :dt-base 70.0
+;;                                    :movie-duration 30
+;;                                    :fft-window-size 1024
+;;                                    :a-transform (spiro-animation:make-fixed-type2 '(1 10) 0.001)
+;;                                    :b-transform (spiro-animation:make-fixed-type2 '(11 20) 0.001)
+;;                                    :h-transform (spiro-animation:make-fixed-type2 '(21 30) 0.001)
+                                   :dt-transform (spiro-animation:make-fixed-type2 '(22 23) 0.001)))
 (defun from-mp3 (&key
                    mp3-file-name output-directory
                    (movie-file-name "spirograph_with_sound.mpg")
@@ -299,14 +341,13 @@
                    (fps 30)
                    (verbose t)
                    (threads 4)
-                   (num-samples 32)
-                   (a-sample 3)
-                   (b-sample 5)
-                   (h-sample 7)
-                   (dt-sample 30)
+                   (fft-window-size 1024)
+                   (a-transform (make-fixed-type2 '(1 10) (/ 1 250.0)))
+                   (b-transform (make-fixed-type2 '(11 20) (/ 1 250.0)))
+                   (h-transform (make-fixed-type2 '(21 30) (/ 1 250.0)))
+                   (dt-transform (make-fixed-type2 '(31 40) (/ 1 250.0)))
                    (movie-duration nil)
                    (tmp-movie-name "spirograph.mpg")
-                   (transition-type :type2)
                    (x-function #'epitrochoid-x) (y-function #'epitrochoid-y))
   "Generate an animation from an MP3 file."
   
@@ -327,12 +368,6 @@
          (full-movie-name (format nil "~a~a" real-dir-name movie-file-name))
          (full-tmp-movie-name (format nil "~a~a" real-dir-name tmp-movie-name))
 
-         (left-channel (make-array num-samples
-                                   :element-type '(complex double-float)))
-
-         (right-channel (make-array num-samples
-                                    :element-type '(complex double-float)))
-
          (spiro (make-spirograph :steps num-steps
                                  :a a-base
                                  :b b-base
@@ -345,59 +380,27 @@
 
     (dotimes (cur-frame total-frames)
       (let* ((file-name (format nil
-                                "~aframe~5,'0d.png" real-dir-name cur-frame)))
+                                "~aframe~5,'0d.png" real-dir-name cur-frame))
         
-        (get-channels-for-fft mp3-file
-                              (interpolate 0.0 song-duration
-                                           cur-frame total-frames)
-                              left-channel right-channel)
+             (win-center (ceiling (* 44100 (interpolate 0.0 song-duration
+                                                        cur-frame total-frames))))
+             (fft-data (bordeaux-fft:windowed-fft (mp3-file-left-channel mp3-file) win-center fft-window-size)))
+        
+        ;; (when verbose (format t "~a ~a~%" (mapcar #'abs (coerce fft-data 'list)) (spark:spark (mapcar #'abs (coerce fft-data 'list)))))
 
-        (bordeaux-fft:fft left-channel)
-
-        (let* ((reduction-factor 100.0)
-               (a-factor (/ (abs (aref left-channel a-sample))
-                            reduction-factor))
-               
-               (b-factor (/ (abs (aref left-channel b-sample))
-                            reduction-factor))
-
-               (h-factor (/ (abs (aref left-channel h-sample))
-                            reduction-factor))
-
-               (dt-factor (/ (abs (aref left-channel dt-sample))
-                             reduction-factor)))
-
-          (if (eq transition-type :type2)
-              (progn
-                (incf (spirograph-a spiro)
-                      (coerce a-factor 'single-float))
-
-                (incf (spirograph-b spiro)
-                      (coerce b-factor 'single-float))
-
-                (incf (spirograph-h spiro)
-                      (coerce h-factor 'single-float))
-
-                (incf (spirograph-dt spiro)
-                      (coerce dt-factor 'single-float))
-
-                (push (cons (copy-structure spiro) file-name)
-                      spiros))
-
-              (progn
-                (setf (spirograph-a spiro)
-                      (coerce (+ a-base a-factor) 'single-float))
-
-                (setf (spirograph-b spiro)
-                      (coerce (+ b-base b-factor) 'single-float))
-
-                (setf (spirograph-h spiro)
-                      (coerce (+ h-base h-factor) 'single-float))
-
-                (incf (spirograph-dt spiro)
-                      (coerce dt-factor 'single-float))
-
-                (push (cons (copy-structure spiro) file-name) spiros))))))
+        (setf spiro (make-spirograph
+                     :steps (spirograph-steps spiro)
+                     :dt-type (spirograph-dt-type spiro)
+                     :a (funcall a-transform (spirograph-a spiro)
+                                 fft-data)
+                     :b (funcall b-transform (spirograph-b spiro)
+                                 fft-data)
+                     :h (funcall h-transform (spirograph-h spiro)
+                                 fft-data)
+                     :dt (funcall dt-transform (spirograph-dt spiro)
+                                  fft-data)))
+        ;; (when verbose (format t "~a~%" spiro))
+        (push (cons (copy-structure spiro) file-name) spiros)))
 
     (setf lparallel:*kernel* kernel)
     (unwind-protect
@@ -418,3 +421,4 @@
     (if (not keep-pngs)
         (dolist (fname files-created)
           (delete-file fname)))))
+
