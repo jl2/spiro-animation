@@ -31,23 +31,24 @@
 ;; a 30.00, b 5.00, h 39.00, steps 1230, dt=pi/dt, dt >= 30, animated
 (defstruct spirograph
   (steps 1200 :type (unsigned-byte 32))
-  (a 30.0 :type single-float)
-  (b 2.0 :type single-float)
-  (h 22.0 :type single-float)
-  (dt 0.5 :type single-float)
-  (dt-type :normal))
+  (a 30.0 :type double-float)
+  (b 2.0 :type double-float)
+  (h 22.0 :type double-float)
+  (dt1 0.05 :type double-float)
+  (dt2 0.06 :type double-float))
 
 (defun interpolate-spirograph (a b cur-step steps &optional (looping nil))
   (make-spirograph :steps (spirograph-steps a)
-                   :dt-type (spirograph-dt-type a)
                    :a (interpolate (spirograph-a a) (spirograph-a b)
                                    cur-step steps looping)
                    :b (interpolate (spirograph-b a) (spirograph-b b)
                                    cur-step steps looping)
                    :h (interpolate (spirograph-h a) (spirograph-h b)
                                    cur-step steps looping)
-                   :dt (interpolate (spirograph-dt a) (spirograph-dt b)
-                                    cur-step steps looping)))
+                   :dt1 (interpolate (spirograph-dt1 a) (spirograph-dt1 b)
+                                     cur-step steps looping)
+                   :dt2 (interpolate (spirograph-dt2 a) (spirograph-dt2 b)
+                                     cur-step steps looping)))
 
 (defun epitrochoid-x (spiro tv)
   "X component of the parametric equation for an epitrochoid curve."
@@ -97,11 +98,6 @@
                               (spirograph-b sp)
                               (spirograph-h sp))))
 
-        ;; real-dt is the actual increase in tv each iteration
-        (real-dt (if (eql (spirograph-dt-type sp) :normal)
-                     (spirograph-dt sp)
-                     (/ pi (spirograph-dt sp))))
-        
         (x-aspect-ratio (if (< height width)
                             (/ height width 1.0)
                             1.0))
@@ -125,7 +121,7 @@
       ;; Draw the curve
       (loop
          for i below (spirograph-steps sp)
-         for cur-t = 0.0 then (* i real-dt)
+         for cur-t = 0.0 then (* i (spirograph-dt1 sp))
          do
            (funcall
             color-function
@@ -138,9 +134,9 @@
             (truncate (xmapper (spirograph-x cur-t)))
             (truncate (ymapper (spirograph-y cur-t)))
             (truncate (xmapper (spirograph-x
-                                (+ (spirograph-dt sp) cur-t))))
+                                (+ (spirograph-dt2 sp) cur-t))))
             (truncate (ymapper (spirograph-y
-                                (+ (spirograph-dt sp) cur-t)))))))))
+                                (+ (spirograph-dt2 sp) cur-t)))))))))
 
 
 (defun cairo-draw-spirograph (file-name spiro width height
@@ -298,29 +294,18 @@
        directory-name
        (concatenate 'string directory-name "/"))))
 
+(defstruct transition
+  (lower 1 :type (unsigned-byte 32))
+  (upper 2 :type (unsigned-byte 32))
+  (scale 1.0 :type double-float))
 
-(defun average-between (fft-data start end)
-  (loop for idx from start below end
-     summing (aref fft-data idx) into total
-     finally (return (coerce (/ (abs total) (- end start)) 'single-float))))
-
-(defun calculate-next-type2 (previous fft-data samples scale-factor)
-  (coerce (+ previous (* scale-factor (abs (average-between fft-data (car samples) (cadr samples))))) 'single-float))
-
-(defun make-fixed-type2 (samples scale-factor)
-  (lambda (previous fft-data)
-    (calculate-next-type2 previous fft-data samples scale-factor)))
-
-(defun calculate-next-type1 (previous fft-data o-value samples scale-factor)
-  (declare (ignore previous))
-  (coerce (+ o-value (* scale-factor (abs (average-between fft-data (car samples) (cadr samples))))) 'single-float))
-
-(defun make-fixed-type1 (o-value samples scale-factor)
-  (lambda (previous fft-data)
-    (calculate-next-type1 previous fft-data o-value samples scale-factor)))
-
-
-;; Sampled call:
+(defun compute-transition (previous fft-data trans)
+  (+ previous
+     (loop for idx from (transition-lower trans) below (transition-upper trans)
+        summing (aref fft-data idx) into total
+        finally (return (* (transition-scale trans) (/ (abs total) (- (transition-upper trans) (transition-lower trans))))))))
+  
+;; Sample call:
 ;; (time (spiro-animation:from-mp3 :mp3-file-name "/mnt/externalhd/PhotoBackup_backup/my_music/silence/encre/01 - Flocon.mp3"
 ;;                                    :output-directory "/home/jeremiah/spirographs/attempt36/"
 ;;                                    :width 800 :height 800
@@ -343,16 +328,21 @@
 
                    (width 800) (height 800)
                    (bit-rate (* 4 1024))
-                   (num-steps 240) (a-base 51.0) (b-base 7.0) (h-base 29.0)
-                   (dt-base 70.0)
+                   (num-steps 240)
+                   (a-base 51.0)
+                   (b-base 7.0)
+                   (h-base 32.0)
+                   (dt1-base 0.005)
+                   (dt2-base 70.0)
                    (fps 30)
                    (verbose t)
                    (threads 4)
                    (fft-window-size 1024)
-                   (a-transform (make-fixed-type2 '(1 10) (/ 1 250.0)))
-                   (b-transform (make-fixed-type2 '(11 20) (/ 1 250.0)))
-                   (h-transform (make-fixed-type2 '(21 30) (/ 1 250.0)))
-                   (dt-transform (make-fixed-type2 '(31 40) (/ 1 250.0)))
+                   (a-transform (make-transition :lower 1 :upper 10 :scale 0.01d0))
+                   (b-transform (make-transition :lower 11 :upper 20 :scale 0.01d0))
+                   (h-transform (make-transition :lower 21 :upper 30 :scale 0.01d0))
+                   (dt1-transform (make-transition :lower 12 :upper 15 :scale 0.005d0))
+                   (dt2-transform (make-transition :lower 10 :upper 13 :scale 0.005d0))
                    (movie-duration nil)
                    (tmp-movie-name "spirograph.mpg")
                    (x-function #'epitrochoid-x) (y-function #'epitrochoid-y))
@@ -376,10 +366,11 @@
          (full-tmp-movie-name (format nil "~a~a" real-dir-name tmp-movie-name))
 
          (spiro (make-spirograph :steps num-steps
-                                 :a a-base
-                                 :b b-base
-                                 :h h-base
-                                 :dt dt-base :dt-type :over-pi))
+                                 :a (coerce a-base 'double-float)
+                                 :b (coerce b-base 'double-float)
+                                 :h (coerce h-base 'double-float)
+                                 :dt1 (coerce dt1-base 'double-float)
+                                 :dt2 (coerce dt2-base 'double-float)))
          (kernel (lparallel:make-kernel threads))
          (futures nil))
     
@@ -397,17 +388,15 @@
 
         (setf spiro (make-spirograph
                      :steps (spirograph-steps spiro)
-                     :dt-type (spirograph-dt-type spiro)
-                     :a (funcall a-transform (spirograph-a spiro)
-                                 fft-data)
-                     :b (funcall b-transform (spirograph-b spiro)
-                                 fft-data)
-                     :h (funcall h-transform (spirograph-h spiro)
-                                 fft-data)
-                     :dt (funcall dt-transform (spirograph-dt spiro)
-                                  fft-data)))
+                     :a (compute-transition (spirograph-a spiro) fft-data a-transform)
+                     :b (compute-transition (spirograph-b spiro) fft-data b-transform)
+                     :h (compute-transition (spirograph-h spiro) fft-data h-transform)
+                     :dt1 (compute-transition (spirograph-dt1 spiro) fft-data dt1-transform)
+                     :dt2 (compute-transition (spirograph-dt2 spiro) fft-data dt2-transform)))
         ;; (when verbose (format t "~a~%" spiro))
         (push (cons (copy-structure spiro) file-name) spiros)))
+
+    (format t "Last spirograph:~% ~a~%" spiro)
 
     (setf lparallel:*kernel* kernel)
     (unwind-protect

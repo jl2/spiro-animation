@@ -20,7 +20,6 @@
    #:animate-spirograph
 
    #:from-mp3
-   #:make-fixed-type2
-   #:calculate-next-type2
+   #:make-transition
 ))
 
